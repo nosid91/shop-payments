@@ -40,7 +40,7 @@ def session_factory(database_url: str) -> Iterator[sessionmaker[Session]]:
 @pytest.fixture(autouse=True)
 def _clean_tables(session_factory: sessionmaker[Session]) -> None:
     with session_factory.begin() as session:
-        session.execute(text("TRUNCATE users, products, carts, cart_items, user_payment_methods CASCADE"))
+        session.execute(text("TRUNCATE users, products, carts, cart_items, user_payment_methods, payments CASCADE"))
 
 
 @pytest.fixture
