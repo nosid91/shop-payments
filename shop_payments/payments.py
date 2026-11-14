@@ -3,12 +3,12 @@ from enum import StrEnum
 from uuid import UUID
 
 from psycopg.errors import UniqueViolation
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from shop_payments.models import Cart, CartItem, CartStatus, FailureCode, Payment, PaymentStatus, UserPaymentMethod
-from shop_payments.provider import MockPaymentProvider, ProviderUnavailableError
+from shop_payments.provider import MockPaymentProvider, ProviderTimeoutError, ProviderUnavailableError
 from shop_payments.schemas import PaymentResponse, PaymentResult
 from shop_payments.totals import CartTotal, MixedCurrenciesError, calculate_cart_total
 
@@ -61,6 +61,12 @@ def _calculate_payable_total(*, cart: Cart) -> CartTotal:
     return total
 
 
+def _reject_pending_payment(*, session: Session, cart_id: UUID) -> None:
+    pending_exists = exists().where(Payment.cart_id == cart_id, Payment.status == PaymentStatus.PENDING)
+    if session.scalar(select(pending_exists)):
+        raise PaymentError(code=ErrorCode.PAYMENT_IN_PROGRESS, message=PAYMENT_IN_PROGRESS_MESSAGE)
+
+
 def _record_outcome(
     *,
     session: Session,
@@ -102,6 +108,7 @@ def start_payment(
             raise PaymentError(code=ErrorCode.CART_NOT_FOUND, message="Cart not found")
         if cart.status != CartStatus.ACTIVE:
             raise PaymentError(code=ErrorCode.CART_NOT_PAYABLE, message="Cart is not active")
+        _reject_pending_payment(session=session, cart_id=cart_id)
         if not cart.items:
             raise PaymentError(code=ErrorCode.CART_EMPTY, message="Cart has no items")
         method = _find_payment_method(session=session, user_id=user_id, payment_method_id=payment_method_id)
@@ -121,6 +128,7 @@ def start_payment(
             if not isinstance(error.orig, UniqueViolation):
                 raise
             raise PaymentError(code=ErrorCode.PAYMENT_IN_PROGRESS, message=PAYMENT_IN_PROGRESS_MESSAGE) from error
+        pending = PaymentResponse.model_validate(obj=payment)
         payment_id = payment.id
         token = method.provider_token
 
@@ -135,6 +143,9 @@ def start_payment(
         )
     except ProviderUnavailableError:
         failure_code = FailureCode.PROVIDER_UNAVAILABLE
+    except ProviderTimeoutError:
+        # The money may have been charged: failing the payment would let the cart be paid a second time.
+        return PaymentResult(payment=pending, replayed=False)
     else:
         charge_id = result.charge_id
         if not result.approved:

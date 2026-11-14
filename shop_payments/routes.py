@@ -32,6 +32,7 @@ ERROR_STATUS_CODES = {
 
 PAYMENT_STATUS_CODES = {
     PaymentStatus.SUCCEEDED: HTTPStatus.CREATED,
+    PaymentStatus.PENDING: HTTPStatus.GATEWAY_TIMEOUT,
 }
 
 FAILURE_STATUS_CODES = {
@@ -75,6 +76,7 @@ def handle_unauthorized(_error: UnauthorizedError) -> tuple[dict, int]:
         404: ErrorResponse,
         409: ErrorResponse,
         502: PaymentResponse,
+        504: PaymentResponse,
     },
     security=[{"bearer": []}],
 )

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from shop_payments.models import Cart, CartStatus, FailureCode, Payment, PaymentStatus
 from shop_payments.provider import (
     TOKEN_CARD_DECLINED,
+    TOKEN_PROVIDER_TIMEOUT,
     TOKEN_PROVIDER_UNAVAILABLE,
     ChargeResult,
     MockPaymentProvider,
@@ -136,6 +137,16 @@ def test_pays_cart_in_non_usd_currency(
     body = response.get_json()
     assert body["amount"] == "30.00"
     assert body["currency"] == "EUR"
+
+
+class RecordingProvider(MockPaymentProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[dict[str, object]] = []
+
+    def charge(self, *, token: str, amount: Decimal, currency: str, idempotency_key: str) -> ChargeResult:
+        self.calls.append({"token": token, "amount": amount, "currency": currency, "idempotency_key": idempotency_key})
+        return super().charge(token=token, amount=amount, currency=currency, idempotency_key=idempotency_key)
 
 
 def test_provider_is_called_without_open_transaction(
@@ -507,3 +518,81 @@ def test_too_long_idempotency_key_is_rejected(
 
     assert response.status_code == 422
     assert payment_count() == 0
+
+
+def test_provider_timeout_keeps_payment_pending(
+    client: FlaskClient,
+    add_user: Callable[[], UUID],
+    add_cart: Callable[..., UUID],
+    add_payment_method: Callable[..., UUID],
+    auth_headers: Callable[..., dict[str, str]],
+    session_factory: sessionmaker[Session],
+    payment_count: Callable[[], int],
+) -> None:
+    user_id = add_user()
+    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
+    add_payment_method(user_id=user_id, token=TOKEN_PROVIDER_TIMEOUT)
+
+    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+
+    assert response.status_code == 504
+    body = response.get_json()
+    assert body["status"] == "pending"
+    assert body["failure_code"] is None
+    assert body["created_at"] is not None
+    with session_factory() as session:
+        payment = session.get_one(entity=Payment, ident=UUID(body["id"]))
+        assert payment.status == PaymentStatus.PENDING
+        assert payment.failure_code is None
+        assert payment.provider_charge_id is None
+        assert session.get_one(entity=Cart, ident=cart_id).status == CartStatus.ACTIVE
+    assert payment_count() == 1
+
+
+@pytest.mark.parametrize("known_method", [True, False], ids=["working_method", "unknown_method"])
+def test_cart_with_unresolved_payment_cannot_be_paid_again(
+    client: FlaskClient,
+    add_user: Callable[[], UUID],
+    add_cart: Callable[..., UUID],
+    add_payment_method: Callable[..., UUID],
+    auth_headers: Callable[..., dict[str, str]],
+    payment_count: Callable[[], int],
+    *,
+    known_method: bool,
+) -> None:
+    user_id = add_user()
+    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
+    add_payment_method(user_id=user_id, token=TOKEN_PROVIDER_TIMEOUT)
+    working_method_id = add_payment_method(user_id=user_id, is_default=False)
+    timed_out = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id, key="key-1"))
+
+    response = client.post(
+        f"/carts/{cart_id}/payments",
+        headers=auth_headers(user_id=user_id, key="key-2"),
+        json={"payment_method_id": str(working_method_id if known_method else uuid4())},
+    )
+
+    assert timed_out.status_code == 504
+    assert response.status_code == 409
+    assert response.get_json()["error"]["code"] == "payment_in_progress"
+    assert payment_count() == 1
+
+
+def test_provider_receives_payment_id_as_idempotency_key(
+    make_app: Callable[..., Flask],
+    add_user: Callable[[], UUID],
+    add_cart: Callable[..., UUID],
+    add_payment_method: Callable[..., UUID],
+    auth_headers: Callable[..., dict[str, str]],
+) -> None:
+    user_id = add_user()
+    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
+    add_payment_method(user_id=user_id)
+    provider = RecordingProvider()
+    client = make_app(provider=provider).test_client()
+
+    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+
+    assert response.status_code == 201
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["idempotency_key"] == response.get_json()["id"]
