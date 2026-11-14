@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from conftest import CARD_APPROVED
 from flask import Flask
 from flask.testing import FlaskClient
 from loguru import logger
@@ -16,41 +17,15 @@ from shop_payments.provider import (
     MockPaymentProvider,
 )
 
-CARD_APPROVED = "tok_visible_marker"
-
 
 @pytest.fixture
-def records() -> Iterator[list[dict]]:
-    # Request this fixture after `pay`: creating the app resets the sinks.
+def records(request: pytest.FixtureRequest) -> Iterator[list[dict]]:
+    # Creating the app resets loguru's sinks, so the capture sink is added only once the app exists.
+    request.getfixturevalue("app")
     captured: list[dict] = []
     sink_id = logger.add(sink=lambda message: captured.append(message.record), format="{message}")
     yield captured
     logger.remove(sink_id)
-
-
-@pytest.fixture
-def pay(
-    app: Flask,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
-) -> Callable[..., TestResponse]:
-    user_id = add_user()
-
-    def pay(*, token: str, request_id: str | None = None) -> TestResponse:
-        cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
-        method_id = add_payment_method(user_id=user_id, token=token, is_default=False)
-        headers = auth_headers(user_id=user_id)
-        if request_id is not None:
-            headers["X-Request-ID"] = request_id
-        return app.test_client().post(
-            f"/carts/{cart_id}/payments",
-            headers=headers,
-            json={"payment_method_id": str(method_id)},
-        )
-
-    return pay
 
 
 def test_response_echoes_request_id(client: FlaskClient) -> None:
@@ -65,8 +40,18 @@ def test_response_gets_generated_request_id(client: FlaskClient) -> None:
     assert response.headers["X-Request-ID"]
 
 
-def test_status_transitions_are_logged(pay: Callable[..., TestResponse], records: list[dict]) -> None:
-    response = pay(token=CARD_APPROVED, request_id="abc-123")
+def test_status_transitions_are_logged(
+    pay: Callable[..., TestResponse],
+    add_user: Callable[[], UUID],
+    add_cart: Callable[..., UUID],
+    add_payment_method: Callable[..., UUID],
+    records: list[dict],
+) -> None:
+    user_id = add_user()
+    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
+    add_payment_method(user_id=user_id)
+
+    response = pay(user_id=user_id, cart_id=cart_id, request_id="abc-123")
 
     payment_id = response.get_json()["id"]
     transitions = {
@@ -78,10 +63,19 @@ def test_status_transitions_are_logged(pay: Callable[..., TestResponse], records
     assert all(extra["request_id"] == "abc-123" for extra in transitions.values())
 
 
-def test_card_token_is_never_logged(pay: Callable[..., TestResponse], records: list[dict]) -> None:
+def test_card_token_is_never_logged(
+    pay: Callable[..., TestResponse],
+    add_user: Callable[[], UUID],
+    add_cart: Callable[..., UUID],
+    add_payment_method: Callable[..., UUID],
+    records: list[dict],
+) -> None:
     tokens = [CARD_APPROVED, TOKEN_CARD_DECLINED, TOKEN_PROVIDER_UNAVAILABLE, TOKEN_PROVIDER_TIMEOUT]
+    user_id = add_user()
     for token in tokens:
-        pay(token=token)
+        cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
+        method_id = add_payment_method(user_id=user_id, token=token, is_default=False)
+        pay(user_id=user_id, cart_id=cart_id, payment_method_id=method_id)
 
     assert records
     for record in records:

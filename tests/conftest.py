@@ -11,15 +11,28 @@ from flask import Flask
 from flask.testing import FlaskClient
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
+from werkzeug.test import TestResponse
 
 from shop_payments import create_app
 from shop_payments.config import BreakerSettings, DatabaseSettings, Settings
 from shop_payments.db import create_session_factory
 from shop_payments.models import Cart, CartItem, Payment, Product, User, UserPaymentMethod
-from shop_payments.provider import MockPaymentProvider
+from shop_payments.provider import ChargeResult, MockPaymentProvider
 
 DEFAULT_TEST_DATABASE_URL = "postgresql+psycopg://shop:shop@localhost:5432/shop_payments_test"
 ALEMBIC_INI = Path(__file__).parent.parent / "alembic.ini"
+# Distinctive on purpose: test_logs asserts the card token never shows up in logs.
+CARD_APPROVED = "tok_approved_card"
+
+
+class RecordingProvider(MockPaymentProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[dict[str, object]] = []
+
+    def charge(self, *, token: str, amount: Decimal, currency: str, idempotency_key: str) -> ChargeResult:
+        self.calls.append({"token": token, "amount": amount, "currency": currency, "idempotency_key": idempotency_key})
+        return super().charge(token=token, amount=amount, currency=currency, idempotency_key=idempotency_key)
 
 
 @pytest.fixture(scope="session")
@@ -41,7 +54,9 @@ def session_factory(database_url: str) -> Iterator[sessionmaker[Session]]:
 @pytest.fixture(autouse=True)
 def _clean_tables(session_factory: sessionmaker[Session]) -> None:
     with session_factory.begin() as session:
-        session.execute(text("TRUNCATE users, products, carts, cart_items, user_payment_methods, payments CASCADE"))
+        session.execute(
+            statement=text("TRUNCATE users, products, carts, cart_items, user_payment_methods, payments CASCADE"),
+        )
 
 
 @pytest.fixture
@@ -90,7 +105,7 @@ def add_cart(session_factory: sessionmaker[Session]) -> Callable[..., UUID]:
 
 @pytest.fixture
 def add_payment_method(session_factory: sessionmaker[Session]) -> Callable[..., UUID]:
-    def add_payment_method(*, user_id: UUID, token: str = "tok_ok", is_default: bool = True) -> UUID:
+    def add_payment_method(*, user_id: UUID, token: str = CARD_APPROVED, is_default: bool = True) -> UUID:
         with session_factory.begin() as session:
             method = UserPaymentMethod(user_id=user_id, provider_token=token, is_default=is_default)
             session.add(method)
@@ -136,3 +151,23 @@ def auth_headers() -> Callable[..., dict[str, str]]:
         return {"Authorization": f"Bearer {user_id}", "Idempotency-Key": key or str(uuid4())}
 
     return auth_headers
+
+
+@pytest.fixture
+def pay(app: Flask, auth_headers: Callable[..., dict[str, str]]) -> Callable[..., TestResponse]:
+    # Every call gets its own client, so concurrent tests never share one.
+    def pay(
+        *,
+        user_id: UUID,
+        cart_id: UUID,
+        key: str | None = None,
+        payment_method_id: UUID | None = None,
+        request_id: str | None = None,
+    ) -> TestResponse:
+        headers = auth_headers(user_id=user_id, key=key)
+        if request_id is not None:
+            headers["X-Request-ID"] = request_id
+        body = None if payment_method_id is None else {"payment_method_id": str(payment_method_id)}
+        return app.test_client().post(f"/carts/{cart_id}/payments", headers=headers, json=body)
+
+    return pay

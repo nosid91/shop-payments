@@ -3,10 +3,12 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
+from conftest import RecordingProvider
 from flask import Flask
 from flask.testing import FlaskClient
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
+from werkzeug.test import TestResponse
 
 from shop_payments.models import Cart, CartStatus, FailureCode, Payment, PaymentStatus
 from shop_payments.provider import (
@@ -16,6 +18,21 @@ from shop_payments.provider import (
     ChargeResult,
     MockPaymentProvider,
 )
+
+
+@pytest.fixture
+def user_id(add_user: Callable[[], UUID]) -> UUID:
+    return add_user()
+
+
+@pytest.fixture
+def cart_id(user_id: UUID, add_cart: Callable[..., UUID]) -> UUID:
+    return add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
+
+
+@pytest.fixture
+def default_method_id(user_id: UUID, add_payment_method: Callable[..., UUID]) -> UUID:
+    return add_payment_method(user_id=user_id)
 
 
 class LockProbingProvider(MockPaymentProvider):
@@ -36,18 +53,15 @@ class LockProbingProvider(MockPaymentProvider):
 
 
 def test_pays_active_cart_with_default_method(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
     add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
+    default_method_id: UUID,
     session_factory: sessionmaker[Session],
 ) -> None:
-    user_id = add_user()
     cart_id = add_cart(user_id=user_id, items=[(Decimal("45.00"), 1, "USD"), (Decimal("12.50"), 2, "USD")])
-    add_payment_method(user_id=user_id)
 
-    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id, key="key-1"))
+    response = pay(user_id=user_id, cart_id=cart_id, key="key-1")
 
     assert response.status_code == 201
     body = response.get_json()
@@ -66,21 +80,25 @@ def test_pays_active_cart_with_default_method(
         assert payment.amount == Decimal("70.00")
         assert payment.user_id == user_id
         assert payment.cart_id == cart_id
+        assert payment.payment_method_id == default_method_id
         assert payment.idempotency_key == "key-1"
 
 
-def test_pays_without_body_or_content_type(
+@pytest.mark.usefixtures("default_method_id")
+def test_pays_without_body_or_content_type(pay: Callable[..., TestResponse], user_id: UUID, cart_id: UUID) -> None:
+    response = pay(user_id=user_id, cart_id=cart_id)
+
+    assert response.status_code == 201
+
+
+@pytest.mark.usefixtures("default_method_id")
+def test_pays_with_empty_json_object(
     client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
+    user_id: UUID,
+    cart_id: UUID,
     auth_headers: Callable[..., dict[str, str]],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
-    add_payment_method(user_id=user_id)
-
-    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id), json={})
 
     assert response.status_code == 201
 
@@ -92,19 +110,17 @@ def test_pays_without_body_or_content_type(
         pytest.param('{"payment_method_id": "%s"', "application/json", id="truncated_json"),
     ],
 )
+@pytest.mark.usefixtures("default_method_id")
 def test_unreadable_body_is_rejected_instead_of_charging_default_method(
     client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
+    user_id: UUID,
+    cart_id: UUID,
     add_payment_method: Callable[..., UUID],
     auth_headers: Callable[..., dict[str, str]],
     payment_count: Callable[[], int],
     data: str,
     content_type: str | None,
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
-    add_payment_method(user_id=user_id)
     named_method_id = add_payment_method(user_id=user_id, is_default=False)
 
     response = client.post(
@@ -119,24 +135,17 @@ def test_unreadable_body_is_rejected_instead_of_charging_default_method(
     assert payment_count() == 0
 
 
+@pytest.mark.usefixtures("default_method_id")
 def test_pays_with_explicit_payment_method(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
+    cart_id: UUID,
     add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
     session_factory: sessionmaker[Session],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
-    add_payment_method(user_id=user_id, is_default=True)
     other_method_id = add_payment_method(user_id=user_id, is_default=False)
 
-    response = client.post(
-        f"/carts/{cart_id}/payments",
-        headers=auth_headers(user_id=user_id),
-        json={"payment_method_id": str(other_method_id)},
-    )
+    response = pay(user_id=user_id, cart_id=cart_id, payment_method_id=other_method_id)
 
     assert response.status_code == 201
     with session_factory() as session:
@@ -145,18 +154,15 @@ def test_pays_with_explicit_payment_method(
         assert payment.payment_method_id == other_method_id
 
 
+@pytest.mark.usefixtures("default_method_id")
 def test_pays_cart_in_non_usd_currency(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
     add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
 ) -> None:
-    user_id = add_user()
     cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 3, "EUR")])
-    add_payment_method(user_id=user_id)
 
-    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+    response = pay(user_id=user_id, cart_id=cart_id)
 
     assert response.status_code == 201
     body = response.get_json()
@@ -164,27 +170,14 @@ def test_pays_cart_in_non_usd_currency(
     assert body["currency"] == "EUR"
 
 
-class RecordingProvider(MockPaymentProvider):
-    def __init__(self) -> None:
-        super().__init__()
-        self.calls: list[dict[str, object]] = []
-
-    def charge(self, *, token: str, amount: Decimal, currency: str, idempotency_key: str) -> ChargeResult:
-        self.calls.append({"token": token, "amount": amount, "currency": currency, "idempotency_key": idempotency_key})
-        return super().charge(token=token, amount=amount, currency=currency, idempotency_key=idempotency_key)
-
-
+@pytest.mark.usefixtures("default_method_id")
 def test_provider_is_called_without_open_transaction(
     make_app: Callable[..., Flask],
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
+    user_id: UUID,
+    cart_id: UUID,
     auth_headers: Callable[..., dict[str, str]],
     session_factory: sessionmaker[Session],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
-    add_payment_method(user_id=user_id)
     provider = LockProbingProvider(session_factory=session_factory, cart_id=cart_id)
     client = make_app(provider=provider).test_client()
 
@@ -194,20 +187,16 @@ def test_provider_is_called_without_open_transaction(
     assert provider.probed
 
 
+@pytest.mark.usefixtures("default_method_id")
 def test_paid_cart_cannot_be_paid_again(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
+    cart_id: UUID,
     payment_count: Callable[[], int],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
-    add_payment_method(user_id=user_id)
-    client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+    pay(user_id=user_id, cart_id=cart_id)
 
-    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+    response = pay(user_id=user_id, cart_id=cart_id)
 
     assert response.status_code == 409
     assert response.get_json()["error"]["code"] == "cart_not_payable"
@@ -222,22 +211,19 @@ def test_paid_cart_cannot_be_paid_again(
     ],
 )
 def test_failed_charge_fails_payment(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
+    cart_id: UUID,
     add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
     session_factory: sessionmaker[Session],
     payment_count: Callable[[], int],
     token: str,
     status_code: int,
     failure_code: FailureCode,
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
     add_payment_method(user_id=user_id, token=token)
 
-    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+    response = pay(user_id=user_id, cart_id=cart_id)
 
     assert response.status_code == status_code
     body = response.get_json()
@@ -253,24 +239,17 @@ def test_failed_charge_fails_payment(
 
 
 def test_retry_after_failure_creates_new_payment(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
+    cart_id: UUID,
     add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
     session_factory: sessionmaker[Session],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
     add_payment_method(user_id=user_id, token=TOKEN_CARD_DECLINED)
     working_method_id = add_payment_method(user_id=user_id, is_default=False)
-    declined = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id, key="key-1"))
+    declined = pay(user_id=user_id, cart_id=cart_id, key="key-1")
 
-    retried = client.post(
-        f"/carts/{cart_id}/payments",
-        headers=auth_headers(user_id=user_id, key="key-2"),
-        json={"payment_method_id": str(working_method_id)},
-    )
+    retried = pay(user_id=user_id, cart_id=cart_id, key="key-2", payment_method_id=working_method_id)
 
     assert declined.status_code == 402
     assert retried.status_code == 201
@@ -320,37 +299,30 @@ def test_bad_token_wins_over_bad_request(client: FlaskClient) -> None:
     assert response.get_json()["error"]["code"] == "unauthorized"
 
 
+@pytest.mark.usefixtures("default_method_id")
 def test_unknown_cart_is_not_found(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
     payment_count: Callable[[], int],
 ) -> None:
-    user_id = add_user()
-    add_payment_method(user_id=user_id)
-
-    response = client.post(f"/carts/{uuid4()}/payments", headers=auth_headers(user_id=user_id))
+    response = pay(user_id=user_id, cart_id=uuid4())
 
     assert response.status_code == 404
     assert response.get_json()["error"]["code"] == "cart_not_found"
     assert payment_count() == 0
 
 
+@pytest.mark.usefixtures("default_method_id")
 def test_foreign_cart_is_not_found(
-    client: FlaskClient,
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
     add_user: Callable[[], UUID],
     add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
     payment_count: Callable[[], int],
 ) -> None:
-    owner_id = add_user()
-    user_id = add_user()
-    cart_id = add_cart(user_id=owner_id, items=[(Decimal("10.00"), 1, "USD")])
-    add_payment_method(user_id=user_id)
+    foreign_cart_id = add_cart(user_id=add_user(), items=[(Decimal("10.00"), 1, "USD")])
 
-    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+    response = pay(user_id=user_id, cart_id=foreign_cart_id)
 
     assert response.status_code == 404
     assert response.get_json()["error"]["code"] == "cart_not_found"
@@ -370,20 +342,17 @@ def test_non_uuid_cart_id_is_rejected(
 
 
 @pytest.mark.parametrize("status", ["checked_out", "abandoned"])
+@pytest.mark.usefixtures("default_method_id")
 def test_inactive_cart_is_not_payable(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
     add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
     payment_count: Callable[[], int],
     status: str,
 ) -> None:
-    user_id = add_user()
     cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")], status=status)
-    add_payment_method(user_id=user_id)
 
-    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+    response = pay(user_id=user_id, cart_id=cart_id)
 
     assert response.status_code == 409
     assert response.get_json()["error"]["code"] == "cart_not_payable"
@@ -401,68 +370,50 @@ def test_inactive_cart_is_not_payable(
         pytest.param([(Decimal("6000000000.00"), 2, "USD")], "invalid_amount", id="total_above_column_limit"),
     ],
 )
+@pytest.mark.usefixtures("default_method_id")
 def test_unpayable_cart_content_is_rejected(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
     add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
     payment_count: Callable[[], int],
     items: list[tuple[Decimal, int, str]],
     code: str,
 ) -> None:
-    user_id = add_user()
     cart_id = add_cart(user_id=user_id, items=items)
-    add_payment_method(user_id=user_id)
 
-    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+    response = pay(user_id=user_id, cart_id=cart_id)
 
     assert response.status_code == 422
     assert response.get_json()["error"]["code"] == code
     assert payment_count() == 0
 
 
+@pytest.mark.usefixtures("default_method_id")
 def test_foreign_payment_method_is_rejected(
-    client: FlaskClient,
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
+    cart_id: UUID,
     add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
     add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
     payment_count: Callable[[], int],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
-    add_payment_method(user_id=user_id)
     foreign_method_id = add_payment_method(user_id=add_user())
 
-    response = client.post(
-        f"/carts/{cart_id}/payments",
-        headers=auth_headers(user_id=user_id),
-        json={"payment_method_id": str(foreign_method_id)},
-    )
+    response = pay(user_id=user_id, cart_id=cart_id, payment_method_id=foreign_method_id)
 
     assert response.status_code == 422
     assert response.get_json()["error"]["code"] == "payment_method_not_found"
     assert payment_count() == 0
 
 
+@pytest.mark.usefixtures("default_method_id")
 def test_unknown_payment_method_is_rejected(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
+    cart_id: UUID,
     payment_count: Callable[[], int],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
-    add_payment_method(user_id=user_id)
-
-    response = client.post(
-        f"/carts/{cart_id}/payments",
-        headers=auth_headers(user_id=user_id),
-        json={"payment_method_id": str(uuid4())},
-    )
+    response = pay(user_id=user_id, cart_id=cart_id, payment_method_id=uuid4())
 
     assert response.status_code == 422
     assert response.get_json()["error"]["code"] == "payment_method_not_found"
@@ -470,38 +421,32 @@ def test_unknown_payment_method_is_rejected(
 
 
 def test_no_default_payment_method_is_rejected(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
+    cart_id: UUID,
     add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
     payment_count: Callable[[], int],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
     add_payment_method(user_id=user_id, is_default=False)
 
-    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+    response = pay(user_id=user_id, cart_id=cart_id)
 
     assert response.status_code == 422
     assert response.get_json()["error"]["code"] == "no_default_payment_method"
     assert payment_count() == 0
 
 
+@pytest.mark.usefixtures("default_method_id")
 def test_newest_default_method_wins(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
+    cart_id: UUID,
     add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
     session_factory: sessionmaker[Session],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
-    add_payment_method(user_id=user_id)
     newest_method_id = add_payment_method(user_id=user_id)
 
-    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+    response = pay(user_id=user_id, cart_id=cart_id)
 
     assert response.status_code == 201
     with session_factory() as session:
@@ -510,55 +455,43 @@ def test_newest_default_method_wins(
         assert payment.payment_method_id == newest_method_id
 
 
+@pytest.mark.usefixtures("default_method_id")
 def test_missing_idempotency_key_is_rejected(
     client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
+    user_id: UUID,
+    cart_id: UUID,
     payment_count: Callable[[], int],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
-    add_payment_method(user_id=user_id)
-
     response = client.post(f"/carts/{cart_id}/payments", headers={"Authorization": f"Bearer {user_id}"})
 
     assert response.status_code == 422
     assert payment_count() == 0
 
 
+@pytest.mark.usefixtures("default_method_id")
 def test_too_long_idempotency_key_is_rejected(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
+    cart_id: UUID,
     payment_count: Callable[[], int],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
-    add_payment_method(user_id=user_id)
-
-    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id, key="k" * 256))
+    response = pay(user_id=user_id, cart_id=cart_id, key="k" * 256)
 
     assert response.status_code == 422
     assert payment_count() == 0
 
 
 def test_provider_timeout_keeps_payment_pending(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
+    cart_id: UUID,
     add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
     session_factory: sessionmaker[Session],
     payment_count: Callable[[], int],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
     add_payment_method(user_id=user_id, token=TOKEN_PROVIDER_TIMEOUT)
 
-    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+    response = pay(user_id=user_id, cart_id=cart_id)
 
     assert response.status_code == 504
     body = response.get_json()
@@ -576,25 +509,23 @@ def test_provider_timeout_keeps_payment_pending(
 
 @pytest.mark.parametrize("known_method", [True, False], ids=["working_method", "unknown_method"])
 def test_cart_with_unresolved_payment_cannot_be_paid_again(
-    client: FlaskClient,
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
+    pay: Callable[..., TestResponse],
+    user_id: UUID,
+    cart_id: UUID,
     add_payment_method: Callable[..., UUID],
-    auth_headers: Callable[..., dict[str, str]],
     payment_count: Callable[[], int],
     *,
     known_method: bool,
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
     add_payment_method(user_id=user_id, token=TOKEN_PROVIDER_TIMEOUT)
     working_method_id = add_payment_method(user_id=user_id, is_default=False)
-    timed_out = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id, key="key-1"))
+    timed_out = pay(user_id=user_id, cart_id=cart_id, key="key-1")
 
-    response = client.post(
-        f"/carts/{cart_id}/payments",
-        headers=auth_headers(user_id=user_id, key="key-2"),
-        json={"payment_method_id": str(working_method_id if known_method else uuid4())},
+    response = pay(
+        user_id=user_id,
+        cart_id=cart_id,
+        key="key-2",
+        payment_method_id=working_method_id if known_method else uuid4(),
     )
 
     assert timed_out.status_code == 504
@@ -603,16 +534,13 @@ def test_cart_with_unresolved_payment_cannot_be_paid_again(
     assert payment_count() == 1
 
 
+@pytest.mark.usefixtures("default_method_id")
 def test_provider_receives_payment_id_as_idempotency_key(
     make_app: Callable[..., Flask],
-    add_user: Callable[[], UUID],
-    add_cart: Callable[..., UUID],
-    add_payment_method: Callable[..., UUID],
+    user_id: UUID,
+    cart_id: UUID,
     auth_headers: Callable[..., dict[str, str]],
 ) -> None:
-    user_id = add_user()
-    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
-    add_payment_method(user_id=user_id)
     provider = RecordingProvider()
     client = make_app(provider=provider).test_client()
 

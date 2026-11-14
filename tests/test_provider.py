@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 import pytest
+from conftest import CARD_APPROVED
 
 from shop_payments.provider import (
     TOKEN_CARD_DECLINED,
@@ -13,7 +14,7 @@ from shop_payments.provider import (
 )
 
 
-def charge(*, provider: MockPaymentProvider, token: str = "tok_regular", idempotency_key: str = "key-1") -> ChargeResult:
+def charge(*, provider: MockPaymentProvider, token: str = CARD_APPROVED, idempotency_key: str = "key-1") -> ChargeResult:
     return provider.charge(token=token, amount=Decimal("10.00"), currency="USD", idempotency_key=idempotency_key)
 
 
