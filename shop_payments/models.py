@@ -18,6 +18,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+UQ_PAYMENTS_USER_IDEMPOTENCY_KEY = "uq_payments_user_idempotency_key"
+UQ_PAYMENTS_CART_ACTIVE = "uq_payments_cart_active"
+
 
 class CartStatus(StrEnum):
     ACTIVE = "active"
@@ -109,9 +112,9 @@ class Payment(Base):
             "(status = 'succeeded') = (provider_charge_id IS NOT NULL)",
             name="ck_payments_provider_charge_id",
         ),
-        UniqueConstraint("user_id", "idempotency_key", name="uq_payments_user_idempotency_key"),
+        UniqueConstraint("user_id", "idempotency_key", name=UQ_PAYMENTS_USER_IDEMPOTENCY_KEY),
         Index(
-            "uq_payments_cart_active",
+            UQ_PAYMENTS_CART_ACTIVE,
             "cart_id",
             unique=True,
             postgresql_where=text("status IN ('pending', 'succeeded')"),

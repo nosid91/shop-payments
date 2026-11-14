@@ -7,6 +7,7 @@ from shop_payments.auth import UnauthorizedError, authenticate
 from shop_payments.models import FailureCode, PaymentStatus
 from shop_payments.payments import ErrorCode, PaymentError, start_payment
 from shop_payments.schemas import (
+    ConflictResponse,
     ErrorBody,
     ErrorResponse,
     PaymentBody,
@@ -42,6 +43,8 @@ FAILURE_STATUS_CODES = {
 
 
 def response_status(*, result: PaymentResult) -> int:
+    if result.replayed and result.payment.status == PaymentStatus.PENDING:
+        return HTTPStatus.CONFLICT
     if result.payment.status == PaymentStatus.FAILED:
         return FAILURE_STATUS_CODES[result.payment.failure_code]
     return PAYMENT_STATUS_CODES[result.payment.status]
@@ -74,7 +77,7 @@ def handle_unauthorized(_error: UnauthorizedError) -> tuple[dict, int]:
         401: ErrorResponse,
         402: PaymentResponse,
         404: ErrorResponse,
-        409: ErrorResponse,
+        409: ConflictResponse,
         502: PaymentResponse,
         504: PaymentResponse,
     },

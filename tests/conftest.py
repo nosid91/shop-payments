@@ -9,13 +9,13 @@ from alembic import command
 from alembic.config import Config
 from flask import Flask
 from flask.testing import FlaskClient
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from shop_payments import create_app
 from shop_payments.config import DatabaseSettings, Settings
 from shop_payments.db import create_session_factory
-from shop_payments.models import Cart, CartItem, Product, User, UserPaymentMethod
+from shop_payments.models import Cart, CartItem, Payment, Product, User, UserPaymentMethod
 from shop_payments.provider import MockPaymentProvider
 
 DEFAULT_TEST_DATABASE_URL = "postgresql+psycopg://shop:shop@localhost:5432/shop_payments_test"
@@ -42,6 +42,15 @@ def session_factory(database_url: str) -> Iterator[sessionmaker[Session]]:
 def _clean_tables(session_factory: sessionmaker[Session]) -> None:
     with session_factory.begin() as session:
         session.execute(text("TRUNCATE users, products, carts, cart_items, user_payment_methods, payments CASCADE"))
+
+
+@pytest.fixture
+def payment_count(session_factory: sessionmaker[Session]) -> Callable[[], int]:
+    def payment_count() -> int:
+        with session_factory() as session:
+            return session.execute(select(func.count()).select_from(Payment)).scalar_one()
+
+    return payment_count
 
 
 @pytest.fixture

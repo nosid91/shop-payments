@@ -2,12 +2,23 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
-from psycopg.errors import UniqueViolation
-from sqlalchemy import exists, func, select
+import psycopg
+from pydantic import BaseModel
+from sqlalchemy import Select, exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
-from shop_payments.models import Cart, CartItem, CartStatus, FailureCode, Payment, PaymentStatus, UserPaymentMethod
+from shop_payments.models import (
+    UQ_PAYMENTS_CART_ACTIVE,
+    UQ_PAYMENTS_USER_IDEMPOTENCY_KEY,
+    Cart,
+    CartItem,
+    CartStatus,
+    FailureCode,
+    Payment,
+    PaymentStatus,
+    UserPaymentMethod,
+)
 from shop_payments.provider import MockPaymentProvider, ProviderTimeoutError, ProviderUnavailableError
 from shop_payments.schemas import PaymentResponse, PaymentResult
 from shop_payments.totals import CartTotal, MixedCurrenciesError, calculate_cart_total
@@ -34,6 +45,14 @@ class PaymentError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+class _KeyRaceError(Exception): ...
+
+
+class _Charge(BaseModel):
+    pending: PaymentResponse
+    token: str
 
 
 def _find_payment_method(*, session: Session, user_id: UUID, payment_method_id: UUID | None) -> UserPaymentMethod:
@@ -88,15 +107,65 @@ def _record_outcome(
     return payment
 
 
-def start_payment(
+def _replay(*, payment: Payment, cart_id: UUID, payment_method_id: UUID | None) -> PaymentResult:
+    if payment.cart_id != cart_id or payment_method_id not in {None, payment.payment_method_id}:
+        raise PaymentError(
+            code=ErrorCode.IDEMPOTENCY_KEY_REUSED,
+            message="The idempotency key was used for a different request",
+        )
+    return PaymentResult(payment=PaymentResponse.model_validate(obj=payment), replayed=True)
+
+
+def _payment_by_key(*, user_id: UUID, idempotency_key: str) -> Select[tuple[Payment]]:
+    return select(Payment).where(Payment.user_id == user_id, Payment.idempotency_key == idempotency_key)
+
+
+def _create_pending_payment(
+    *,
+    session: Session,
+    cart: Cart,
+    idempotency_key: str,
+    payment_method_id: UUID | None,
+) -> _Charge:
+    if cart.status != CartStatus.ACTIVE:
+        raise PaymentError(code=ErrorCode.CART_NOT_PAYABLE, message="Cart is not active")
+    _reject_pending_payment(session=session, cart_id=cart.id)
+    if not cart.items:
+        raise PaymentError(code=ErrorCode.CART_EMPTY, message="Cart has no items")
+    method = _find_payment_method(session=session, user_id=cart.user_id, payment_method_id=payment_method_id)
+    total = _calculate_payable_total(cart=cart)
+    payment = Payment(
+        user_id=cart.user_id,
+        cart_id=cart.id,
+        payment_method_id=method.id,
+        amount=total.amount,
+        currency=total.currency,
+        idempotency_key=idempotency_key,
+    )
+    session.add(payment)
+    try:
+        session.flush()
+    except IntegrityError as error:
+        if not isinstance(error.orig, psycopg.errors.UniqueViolation):
+            raise
+        constraint = error.orig.diag.constraint_name
+        if constraint == UQ_PAYMENTS_CART_ACTIVE:
+            raise PaymentError(code=ErrorCode.PAYMENT_IN_PROGRESS, message=PAYMENT_IN_PROGRESS_MESSAGE) from error
+        if constraint == UQ_PAYMENTS_USER_IDEMPOTENCY_KEY:
+            # Another cart's request holds the same key in a transaction we cannot see, and its cart lock is not ours.
+            raise _KeyRaceError from error
+        raise
+    return _Charge(pending=PaymentResponse.model_validate(obj=payment), token=method.provider_token)
+
+
+def _open_payment(
     *,
     session_factory: sessionmaker[Session],
-    provider: MockPaymentProvider,
     user_id: UUID,
     cart_id: UUID,
     idempotency_key: str,
     payment_method_id: UUID | None,
-) -> PaymentResult:
+) -> PaymentResult | _Charge:
     with session_factory.begin() as session:
         cart = session.scalars(
             select(Cart)
@@ -106,40 +175,52 @@ def start_payment(
         ).one_or_none()
         if cart is None:
             raise PaymentError(code=ErrorCode.CART_NOT_FOUND, message="Cart not found")
-        if cart.status != CartStatus.ACTIVE:
-            raise PaymentError(code=ErrorCode.CART_NOT_PAYABLE, message="Cart is not active")
-        _reject_pending_payment(session=session, cart_id=cart_id)
-        if not cart.items:
-            raise PaymentError(code=ErrorCode.CART_EMPTY, message="Cart has no items")
-        method = _find_payment_method(session=session, user_id=user_id, payment_method_id=payment_method_id)
-        total = _calculate_payable_total(cart=cart)
-        payment = Payment(
+        # After the lock: a request that waited for the original sees its payment. Before the cart checks: a replay
+        # of a paid cart (checked out) or of an unresolved payment must get that payment back.
+        existing = session.scalars(_payment_by_key(user_id=user_id, idempotency_key=idempotency_key)).one_or_none()
+        if existing is not None:
+            return _replay(payment=existing, cart_id=cart_id, payment_method_id=payment_method_id)
+        return _create_pending_payment(
+            session=session,
+            cart=cart,
+            idempotency_key=idempotency_key,
+            payment_method_id=payment_method_id,
+        )
+
+
+def start_payment(
+    *,
+    session_factory: sessionmaker[Session],
+    provider: MockPaymentProvider,
+    user_id: UUID,
+    cart_id: UUID,
+    idempotency_key: str,
+    payment_method_id: UUID | None,
+) -> PaymentResult:
+    try:
+        opened = _open_payment(
+            session_factory=session_factory,
             user_id=user_id,
             cart_id=cart_id,
-            payment_method_id=method.id,
-            amount=total.amount,
-            currency=total.currency,
             idempotency_key=idempotency_key,
+            payment_method_id=payment_method_id,
         )
-        session.add(payment)
-        try:
-            session.flush()
-        except IntegrityError as error:
-            if not isinstance(error.orig, UniqueViolation):
-                raise
-            raise PaymentError(code=ErrorCode.PAYMENT_IN_PROGRESS, message=PAYMENT_IN_PROGRESS_MESSAGE) from error
-        pending = PaymentResponse.model_validate(obj=payment)
-        payment_id = payment.id
-        token = method.provider_token
+    except _KeyRaceError:
+        with session_factory.begin() as session:
+            payment = session.scalars(_payment_by_key(user_id=user_id, idempotency_key=idempotency_key)).one()
+            return _replay(payment=payment, cart_id=cart_id, payment_method_id=payment_method_id)
+    if isinstance(opened, PaymentResult):
+        return opened
+    pending = opened.pending
 
     charge_id = None
     failure_code = None
     try:
         result = provider.charge(
-            token=token,
-            amount=total.amount,
-            currency=total.currency,
-            idempotency_key=str(payment_id),
+            token=opened.token,
+            amount=pending.amount,
+            currency=pending.currency,
+            idempotency_key=str(pending.id),
         )
     except ProviderUnavailableError:
         failure_code = FailureCode.PROVIDER_UNAVAILABLE
@@ -154,7 +235,7 @@ def start_payment(
     with session_factory.begin() as session:
         payment = _record_outcome(
             session=session,
-            payment_id=payment_id,
+            payment_id=pending.id,
             cart_id=cart_id,
             charge_id=charge_id,
             failure_code=failure_code,

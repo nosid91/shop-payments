@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 from flask import Flask
 from flask.testing import FlaskClient
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from shop_payments.models import Cart, CartStatus, FailureCode, Payment, PaymentStatus
@@ -16,15 +16,6 @@ from shop_payments.provider import (
     ChargeResult,
     MockPaymentProvider,
 )
-
-
-@pytest.fixture
-def payment_count(session_factory: sessionmaker[Session]) -> Callable[[], int]:
-    def payment_count() -> int:
-        with session_factory() as session:
-            return session.execute(select(func.count()).select_from(Payment)).scalar_one()
-
-    return payment_count
 
 
 class LockProbingProvider(MockPaymentProvider):
