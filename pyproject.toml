@@ -27,6 +27,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"shop_payments/provider.py" = ["S105"]  # card tokens of the mock provider, not secrets
 "migrations/*" = ["INP001"]  # not a package: Alembic loads these files by path
 "tests/*" = ["INP001", "PLR2004", "S101", "S107"]  # S107: fake card tokens as parameter defaults
 
