@@ -1,3 +1,4 @@
+import pybreaker
 from flask_openapi import Info, OpenAPI
 
 from shop_payments.config import Settings
@@ -16,6 +17,13 @@ def create_app(*, settings: Settings | None = None, provider: MockPaymentProvide
     app.config["SETTINGS"] = settings
     app.extensions["session_factory"] = create_session_factory(database_url=settings.database.url)
     app.extensions["payment_provider"] = provider or MockPaymentProvider()
+    app.extensions["provider_breaker"] = pybreaker.CircuitBreaker(
+        fail_max=settings.breaker.fail_max,
+        reset_timeout=settings.breaker.reset_timeout,
+        # With the default, the call that trips the circuit raises CircuitBreakerError instead of the original error,
+        # and a timeout (unknown outcome) would be recorded as failed.
+        throw_new_error_on_trip=False,
+    )
     app.register_api(api)
 
     @app.get("/health")

@@ -3,6 +3,7 @@ from enum import StrEnum
 from uuid import UUID
 
 import psycopg
+import pybreaker
 from pydantic import BaseModel
 from sqlalchemy import Select, exists, func, select
 from sqlalchemy.exc import IntegrityError
@@ -192,6 +193,7 @@ def start_payment(
     *,
     session_factory: sessionmaker[Session],
     provider: MockPaymentProvider,
+    breaker: pybreaker.CircuitBreaker,
     user_id: UUID,
     cart_id: UUID,
     idempotency_key: str,
@@ -216,12 +218,15 @@ def start_payment(
     charge_id = None
     failure_code = None
     try:
-        result = provider.charge(
+        result = breaker.call(
+            provider.charge,
             token=opened.token,
             amount=pending.amount,
             currency=pending.currency,
             idempotency_key=str(pending.id),
         )
+    except pybreaker.CircuitBreakerError:
+        failure_code = FailureCode.CIRCUIT_OPEN
     except ProviderUnavailableError:
         failure_code = FailureCode.PROVIDER_UNAVAILABLE
     except ProviderTimeoutError:

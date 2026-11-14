@@ -13,7 +13,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from shop_payments import create_app
-from shop_payments.config import DatabaseSettings, Settings
+from shop_payments.config import BreakerSettings, DatabaseSettings, Settings
 from shop_payments.db import create_session_factory
 from shop_payments.models import Cart, CartItem, Payment, Product, User, UserPaymentMethod
 from shop_payments.provider import MockPaymentProvider
@@ -104,8 +104,12 @@ def add_payment_method(session_factory: sessionmaker[Session]) -> Callable[..., 
 def make_app(database_url: str) -> Iterator[Callable[..., Flask]]:
     apps: list[Flask] = []
 
-    def make_app(*, provider: MockPaymentProvider | None = None) -> Flask:
-        app = create_app(settings=Settings(database=DatabaseSettings(url=database_url)), provider=provider)
+    def make_app(*, provider: MockPaymentProvider | None = None, breaker_fail_max: int = 5) -> Flask:
+        settings = Settings(
+            database=DatabaseSettings(url=database_url),
+            breaker=BreakerSettings(fail_max=breaker_fail_max, reset_timeout=60),
+        )
+        app = create_app(settings=settings, provider=provider)
         apps.append(app)
         return app
 

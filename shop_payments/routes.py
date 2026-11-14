@@ -39,6 +39,7 @@ PAYMENT_STATUS_CODES = {
 FAILURE_STATUS_CODES = {
     FailureCode.CARD_DECLINED: HTTPStatus.PAYMENT_REQUIRED,
     FailureCode.PROVIDER_UNAVAILABLE: HTTPStatus.BAD_GATEWAY,
+    FailureCode.CIRCUIT_OPEN: HTTPStatus.SERVICE_UNAVAILABLE,
 }
 
 
@@ -79,6 +80,7 @@ def handle_unauthorized(_error: UnauthorizedError) -> tuple[dict, int]:
         404: ErrorResponse,
         409: ConflictResponse,
         502: PaymentResponse,
+        503: PaymentResponse,
         504: PaymentResponse,
     },
     security=[{"bearer": []}],
@@ -87,6 +89,7 @@ def create_payment(*, path: PaymentPath, header: PaymentHeaders, body: PaymentBo
     result = start_payment(
         session_factory=current_app.extensions["session_factory"],
         provider=current_app.extensions["payment_provider"],
+        breaker=current_app.extensions["provider_breaker"],
         user_id=g.user_id,
         cart_id=path.cart_id,
         idempotency_key=header.idempotency_key,
