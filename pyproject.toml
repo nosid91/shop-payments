@@ -1,0 +1,38 @@
+[project]
+name = "shop-payments"
+version = "0.1.0"
+description = "Payment service for an online shop: SQL schema and an HTTP endpoint that starts a cart payment."
+requires-python = ">=3.13"
+dependencies = [
+    "flask (>=3.1.3,<4.0.0)",
+    "flask-openapi[swagger] (>=5.0.0,<6.0.0)",
+    "pydantic-settings (>=2.16.3,<3.0.0)",
+]
+
+[tool.poetry]
+package-mode = false
+
+[tool.ruff]
+line-length = 121
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",  # conflicts with the formatter
+    "CPY",     # no copyright headers
+    "D",       # docstrings: code documents itself
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["INP001", "PLR2004", "S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest (>=9.2.0,<10.0.0)",
+    "ruff (>=0.17.5,<0.18.0)",
+    "pre-commit (>=4.7.0,<5.0.0)",
+]

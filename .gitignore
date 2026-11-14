@@ -1,0 +1,11 @@
+.env
+.env.*
+.venv/
+.idea/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+!.env.example
