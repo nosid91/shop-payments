@@ -54,7 +54,7 @@ card is charged. Whenever a payment exists, the response body is that payment.
 Requests rejected before a payment exists answer with `{"error": {"code": "…", "message": "…"}}`: 401
 `unauthorized`; 404 `cart_not_found`; 409 `cart_not_payable`, `payment_in_progress`; 422 `cart_empty`,
 `mixed_currencies`, `invalid_amount`, `payment_method_not_found`, `no_default_payment_method`,
-`idempotency_key_reused`, and flask-openapi's own validation errors.
+`idempotency_key_reused`, `invalid_body`, and flask-openapi's own validation errors.
 
 Repeating an `Idempotency-Key` for the same cart returns the existing payment and never charges again: 201 for
 `succeeded`, the original 402, 502 or 503 for `failed`, 409 for `pending`. After a failure the client may retry

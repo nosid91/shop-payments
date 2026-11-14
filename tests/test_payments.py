@@ -85,6 +85,40 @@ def test_pays_without_body_or_content_type(
     assert response.status_code == 201
 
 
+@pytest.mark.parametrize(
+    ("data", "content_type"),
+    [
+        pytest.param('{"payment_method_id": "%s"}', None, id="json_without_content_type"),
+        pytest.param('{"payment_method_id": "%s"', "application/json", id="truncated_json"),
+    ],
+)
+def test_unreadable_body_is_rejected_instead_of_charging_default_method(
+    client: FlaskClient,
+    add_user: Callable[[], UUID],
+    add_cart: Callable[..., UUID],
+    add_payment_method: Callable[..., UUID],
+    auth_headers: Callable[..., dict[str, str]],
+    payment_count: Callable[[], int],
+    data: str,
+    content_type: str | None,
+) -> None:
+    user_id = add_user()
+    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
+    add_payment_method(user_id=user_id)
+    named_method_id = add_payment_method(user_id=user_id, is_default=False)
+
+    response = client.post(
+        f"/carts/{cart_id}/payments",
+        headers=auth_headers(user_id=user_id),
+        data=data % named_method_id,
+        content_type=content_type,
+    )
+
+    assert response.status_code == 422
+    assert response.get_json()["error"]["code"] == "invalid_body"
+    assert payment_count() == 0
+
+
 def test_pays_with_explicit_payment_method(
     client: FlaskClient,
     add_user: Callable[[], UUID],

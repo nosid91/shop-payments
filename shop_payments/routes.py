@@ -59,6 +59,16 @@ def authenticate_request() -> None:
     )
 
 
+# flask-openapi gives a body it cannot read as JSON to the model as None, exactly like a request without a body,
+# and the default card would be charged instead of the one the client named.
+@api.before_request
+def reject_unreadable_body() -> tuple[dict, int] | None:
+    if request.get_data() and request.get_json(silent=True) is None:
+        body = ErrorResponse(error=ErrorBody(code="invalid_body", message="Request body must be a JSON object"))
+        return body.model_dump(mode="json"), HTTPStatus.UNPROCESSABLE_ENTITY
+    return None
+
+
 @api.errorhandler(PaymentError)
 def handle_payment_error(error: PaymentError) -> tuple[dict, int]:
     body = ErrorResponse(error=ErrorBody(code=error.code, message=error.message))
