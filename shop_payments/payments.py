@@ -1,3 +1,4 @@
+from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
@@ -9,8 +10,10 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from shop_payments.models import Cart, CartItem, CartStatus, Payment, PaymentStatus, UserPaymentMethod
 from shop_payments.provider import MockPaymentProvider
 from shop_payments.schemas import PaymentResponse, PaymentResult
-from shop_payments.totals import calculate_cart_total
+from shop_payments.totals import CartTotal, MixedCurrenciesError, calculate_cart_total
 
+# The largest value NUMERIC(12, 2) can hold.
+MAX_AMOUNT = Decimal("9999999999.99")
 PAYMENT_IN_PROGRESS_MESSAGE = "The cart already has a payment in progress or paid"
 
 
@@ -36,10 +39,26 @@ class PaymentError(Exception):
 def _find_payment_method(*, session: Session, user_id: UUID, payment_method_id: UUID | None) -> UserPaymentMethod:
     query = select(UserPaymentMethod).where(UserPaymentMethod.user_id == user_id)
     if payment_method_id is None:
-        query = query.where(UserPaymentMethod.is_default).order_by(UserPaymentMethod.created_at.desc()).limit(1)
+        method = session.scalars(
+            query.where(UserPaymentMethod.is_default).order_by(UserPaymentMethod.created_at.desc()).limit(1),
+        ).first()
+        if method is None:
+            raise PaymentError(code=ErrorCode.NO_DEFAULT_PAYMENT_METHOD, message="No default payment method")
     else:
-        query = query.where(UserPaymentMethod.id == payment_method_id)
-    return session.scalars(query).one()
+        method = session.scalars(query.where(UserPaymentMethod.id == payment_method_id)).first()
+        if method is None:
+            raise PaymentError(code=ErrorCode.PAYMENT_METHOD_NOT_FOUND, message="Payment method not found")
+    return method
+
+
+def _calculate_payable_total(*, cart: Cart) -> CartTotal:
+    try:
+        total = calculate_cart_total(items=cart.items)
+    except MixedCurrenciesError as error:
+        raise PaymentError(code=ErrorCode.MIXED_CURRENCIES, message="Cart items have different currencies") from error
+    if not 0 < total.amount <= MAX_AMOUNT:
+        raise PaymentError(code=ErrorCode.INVALID_AMOUNT, message="Cart total is outside the payable range")
+    return total
 
 
 def start_payment(
@@ -57,9 +76,15 @@ def start_payment(
             .where(Cart.id == cart_id, Cart.user_id == user_id)
             .options(selectinload(Cart.items).selectinload(CartItem.product))
             .with_for_update(),
-        ).one()
+        ).one_or_none()
+        if cart is None:
+            raise PaymentError(code=ErrorCode.CART_NOT_FOUND, message="Cart not found")
+        if cart.status != CartStatus.ACTIVE:
+            raise PaymentError(code=ErrorCode.CART_NOT_PAYABLE, message="Cart is not active")
+        if not cart.items:
+            raise PaymentError(code=ErrorCode.CART_EMPTY, message="Cart has no items")
         method = _find_payment_method(session=session, user_id=user_id, payment_method_id=payment_method_id)
-        total = calculate_cart_total(items=cart.items)
+        total = _calculate_payable_total(cart=cart)
         payment = Payment(
             user_id=user_id,
             cart_id=cart_id,

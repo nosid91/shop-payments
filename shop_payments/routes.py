@@ -3,7 +3,7 @@ from http import HTTPStatus
 from flask import current_app, g, request
 from flask_openapi import APIBlueprint
 
-from shop_payments.auth import authenticate
+from shop_payments.auth import UnauthorizedError, authenticate
 from shop_payments.models import PaymentStatus
 from shop_payments.payments import ErrorCode, PaymentError, start_payment
 from shop_payments.schemas import (
@@ -53,9 +53,15 @@ def handle_payment_error(error: PaymentError) -> tuple[dict, int]:
     return body.model_dump(mode="json"), ERROR_STATUS_CODES[error.code]
 
 
+@api.errorhandler(UnauthorizedError)
+def handle_unauthorized(_error: UnauthorizedError) -> tuple[dict, int]:
+    body = ErrorResponse(error=ErrorBody(code="unauthorized", message="Missing or invalid bearer token"))
+    return body.model_dump(mode="json"), HTTPStatus.UNAUTHORIZED
+
+
 @api.post(
     "/carts/<cart_id>/payments",
-    responses={201: PaymentResponse, 409: ErrorResponse},
+    responses={201: PaymentResponse, 401: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse},
     security=[{"bearer": []}],
 )
 def create_payment(*, path: PaymentPath, header: PaymentHeaders, body: PaymentBody) -> tuple[dict, int]:
