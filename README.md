@@ -16,3 +16,12 @@ make test                # tests run against the shop_payments_test database
 
 The tests need the `db` container; they migrate the test database themselves.
 Set `TEST_DATABASE_URL` to run the tests against another database.
+
+## Running with Docker
+
+```sh
+docker compose up --build --wait  # PostgreSQL and the service; migrations run on start
+make seed                         # demo data (safe to repeat)
+```
+
+The service listens on http://localhost:8000 (`/health`), the API docs are at `/openapi`.

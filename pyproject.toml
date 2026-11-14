@@ -12,6 +12,7 @@ dependencies = [
     "alembic (>=1.20.1,<2.0.0)",
     "pybreaker (>=1.4.1,<2.0.0)",
     "loguru (>=0.8.0,<0.9.0)",
+    "gunicorn (>=27.0.1,<28.0.0)",
 ]
 
 [tool.poetry]

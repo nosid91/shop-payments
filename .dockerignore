@@ -1,0 +1,7 @@
+*
+!pyproject.toml
+!poetry.lock
+!alembic.ini
+!migrations
+!shop_payments
+**/__pycache__
