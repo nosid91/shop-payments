@@ -7,8 +7,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
-from shop_payments.models import Cart, CartItem, CartStatus, Payment, PaymentStatus, UserPaymentMethod
-from shop_payments.provider import MockPaymentProvider
+from shop_payments.models import Cart, CartItem, CartStatus, FailureCode, Payment, PaymentStatus, UserPaymentMethod
+from shop_payments.provider import MockPaymentProvider, ProviderUnavailableError
 from shop_payments.schemas import PaymentResponse, PaymentResult
 from shop_payments.totals import CartTotal, MixedCurrenciesError, calculate_cart_total
 
@@ -61,6 +61,27 @@ def _calculate_payable_total(*, cart: Cart) -> CartTotal:
     return total
 
 
+def _record_outcome(
+    *,
+    session: Session,
+    payment_id: UUID,
+    cart_id: UUID,
+    charge_id: str | None,
+    failure_code: FailureCode | None,
+) -> Payment:
+    payment = session.get_one(entity=Payment, ident=payment_id)
+    if failure_code is None:
+        payment.status = PaymentStatus.SUCCEEDED
+        payment.provider_charge_id = charge_id
+        cart = session.get_one(entity=Cart, ident=cart_id)
+        cart.status = CartStatus.CHECKED_OUT
+        cart.updated_at = func.now()
+    else:
+        payment.status = PaymentStatus.FAILED
+        payment.failure_code = failure_code
+    return payment
+
+
 def start_payment(
     *,
     session_factory: sessionmaker[Session],
@@ -103,19 +124,28 @@ def start_payment(
         payment_id = payment.id
         token = method.provider_token
 
-    result = provider.charge(
-        token=token,
-        amount=total.amount,
-        currency=total.currency,
-        idempotency_key=str(payment_id),
-    )
+    charge_id = None
+    failure_code = None
+    try:
+        result = provider.charge(
+            token=token,
+            amount=total.amount,
+            currency=total.currency,
+            idempotency_key=str(payment_id),
+        )
+    except ProviderUnavailableError:
+        failure_code = FailureCode.PROVIDER_UNAVAILABLE
+    else:
+        charge_id = result.charge_id
+        if not result.approved:
+            failure_code = FailureCode.CARD_DECLINED
 
     with session_factory.begin() as session:
-        payment = session.get_one(entity=Payment, ident=payment_id)
-        if result.approved:
-            payment.status = PaymentStatus.SUCCEEDED
-            payment.provider_charge_id = result.charge_id
-            cart = session.get_one(entity=Cart, ident=cart_id)
-            cart.status = CartStatus.CHECKED_OUT
-            cart.updated_at = func.now()
+        payment = _record_outcome(
+            session=session,
+            payment_id=payment_id,
+            cart_id=cart_id,
+            charge_id=charge_id,
+            failure_code=failure_code,
+        )
         return PaymentResult(payment=PaymentResponse.model_validate(obj=payment), replayed=False)

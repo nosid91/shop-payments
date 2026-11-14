@@ -4,7 +4,7 @@ from flask import current_app, g, request
 from flask_openapi import APIBlueprint
 
 from shop_payments.auth import UnauthorizedError, authenticate
-from shop_payments.models import PaymentStatus
+from shop_payments.models import FailureCode, PaymentStatus
 from shop_payments.payments import ErrorCode, PaymentError, start_payment
 from shop_payments.schemas import (
     ErrorBody,
@@ -34,8 +34,15 @@ PAYMENT_STATUS_CODES = {
     PaymentStatus.SUCCEEDED: HTTPStatus.CREATED,
 }
 
+FAILURE_STATUS_CODES = {
+    FailureCode.CARD_DECLINED: HTTPStatus.PAYMENT_REQUIRED,
+    FailureCode.PROVIDER_UNAVAILABLE: HTTPStatus.BAD_GATEWAY,
+}
+
 
 def response_status(*, result: PaymentResult) -> int:
+    if result.payment.status == PaymentStatus.FAILED:
+        return FAILURE_STATUS_CODES[result.payment.failure_code]
     return PAYMENT_STATUS_CODES[result.payment.status]
 
 
@@ -61,7 +68,14 @@ def handle_unauthorized(_error: UnauthorizedError) -> tuple[dict, int]:
 
 @api.post(
     "/carts/<cart_id>/payments",
-    responses={201: PaymentResponse, 401: ErrorResponse, 404: ErrorResponse, 409: ErrorResponse},
+    responses={
+        201: PaymentResponse,
+        401: ErrorResponse,
+        402: PaymentResponse,
+        404: ErrorResponse,
+        409: ErrorResponse,
+        502: PaymentResponse,
+    },
     security=[{"bearer": []}],
 )
 def create_payment(*, path: PaymentPath, header: PaymentHeaders, body: PaymentBody) -> tuple[dict, int]:

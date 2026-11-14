@@ -8,8 +8,13 @@ from flask.testing import FlaskClient
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from shop_payments.models import Cart, Payment, PaymentStatus
-from shop_payments.provider import ChargeResult, MockPaymentProvider
+from shop_payments.models import Cart, CartStatus, FailureCode, Payment, PaymentStatus
+from shop_payments.provider import (
+    TOKEN_CARD_DECLINED,
+    TOKEN_PROVIDER_UNAVAILABLE,
+    ChargeResult,
+    MockPaymentProvider,
+)
 
 
 @pytest.fixture
@@ -171,6 +176,72 @@ def test_paid_cart_cannot_be_paid_again(
     assert response.status_code == 409
     assert response.get_json()["error"]["code"] == "cart_not_payable"
     assert payment_count() == 1
+
+
+@pytest.mark.parametrize(
+    ("token", "status_code", "failure_code"),
+    [
+        pytest.param(TOKEN_CARD_DECLINED, 402, FailureCode.CARD_DECLINED, id="declined_card"),
+        pytest.param(TOKEN_PROVIDER_UNAVAILABLE, 502, FailureCode.PROVIDER_UNAVAILABLE, id="unavailable_provider"),
+    ],
+)
+def test_failed_charge_fails_payment(
+    client: FlaskClient,
+    add_user: Callable[[], UUID],
+    add_cart: Callable[..., UUID],
+    add_payment_method: Callable[..., UUID],
+    auth_headers: Callable[..., dict[str, str]],
+    session_factory: sessionmaker[Session],
+    payment_count: Callable[[], int],
+    token: str,
+    status_code: int,
+    failure_code: FailureCode,
+) -> None:
+    user_id = add_user()
+    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
+    add_payment_method(user_id=user_id, token=token)
+
+    response = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id))
+
+    assert response.status_code == status_code
+    body = response.get_json()
+    assert body["status"] == "failed"
+    assert body["failure_code"] == failure_code
+    with session_factory() as session:
+        payment = session.get_one(entity=Payment, ident=UUID(body["id"]))
+        assert payment.status == PaymentStatus.FAILED
+        assert payment.failure_code == failure_code
+        assert payment.provider_charge_id is None
+        assert session.get_one(entity=Cart, ident=cart_id).status == CartStatus.ACTIVE
+    assert payment_count() == 1
+
+
+def test_retry_after_failure_creates_new_payment(
+    client: FlaskClient,
+    add_user: Callable[[], UUID],
+    add_cart: Callable[..., UUID],
+    add_payment_method: Callable[..., UUID],
+    auth_headers: Callable[..., dict[str, str]],
+    session_factory: sessionmaker[Session],
+) -> None:
+    user_id = add_user()
+    cart_id = add_cart(user_id=user_id, items=[(Decimal("10.00"), 1, "USD")])
+    add_payment_method(user_id=user_id, token=TOKEN_CARD_DECLINED)
+    working_method_id = add_payment_method(user_id=user_id, is_default=False)
+    declined = client.post(f"/carts/{cart_id}/payments", headers=auth_headers(user_id=user_id, key="key-1"))
+
+    retried = client.post(
+        f"/carts/{cart_id}/payments",
+        headers=auth_headers(user_id=user_id, key="key-2"),
+        json={"payment_method_id": str(working_method_id)},
+    )
+
+    assert declined.status_code == 402
+    assert retried.status_code == 201
+    with session_factory() as session:
+        payments = session.scalars(select(Payment).where(Payment.cart_id == cart_id)).all()
+        assert sorted(payment.status for payment in payments) == [PaymentStatus.FAILED, PaymentStatus.SUCCEEDED]
+        assert session.get_one(entity=Cart, ident=cart_id).status == CartStatus.CHECKED_OUT
 
 
 def test_openapi_document_describes_endpoint(client: FlaskClient) -> None:
