@@ -26,6 +26,9 @@ ignore = [
     "D",       # docstrings: code documents itself
 ]
 
+[tool.ruff.lint.pylint]
+max-args = 12  # keyword-only signatures and pytest fixtures are explicit, not long
+
 [tool.ruff.lint.per-file-ignores]
 "shop_payments/provider.py" = ["S105"]  # card tokens of the mock provider, not secrets
 "migrations/*" = ["INP001"]  # not a package: Alembic loads these files by path

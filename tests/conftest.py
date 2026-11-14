@@ -16,6 +16,7 @@ from shop_payments import create_app
 from shop_payments.config import DatabaseSettings, Settings
 from shop_payments.db import create_session_factory
 from shop_payments.models import Cart, CartItem, Product, User, UserPaymentMethod
+from shop_payments.provider import MockPaymentProvider
 
 DEFAULT_TEST_DATABASE_URL = "postgresql+psycopg://shop:shop@localhost:5432/shop_payments_test"
 ALEMBIC_INI = Path(__file__).parent.parent / "alembic.ini"
@@ -91,14 +92,34 @@ def add_payment_method(session_factory: sessionmaker[Session]) -> Callable[..., 
 
 
 @pytest.fixture
-def app(database_url: str) -> Iterator[Flask]:
-    app = create_app(settings=Settings(database=DatabaseSettings(url=database_url)))
-    yield app
+def make_app(database_url: str) -> Iterator[Callable[..., Flask]]:
+    apps: list[Flask] = []
+
+    def make_app(*, provider: MockPaymentProvider | None = None) -> Flask:
+        app = create_app(settings=Settings(database=DatabaseSettings(url=database_url)), provider=provider)
+        apps.append(app)
+        return app
+
+    yield make_app
     # Each app owns an engine; release its pooled connections so a long suite does not exhaust Postgres.
-    with app.extensions["session_factory"]() as session:
-        session.get_bind().dispose()
+    for app in apps:
+        with app.extensions["session_factory"]() as session:
+            session.get_bind().dispose()
+
+
+@pytest.fixture
+def app(make_app: Callable[..., Flask]) -> Flask:
+    return make_app()
 
 
 @pytest.fixture
 def client(app: Flask) -> FlaskClient:
     return app.test_client()
+
+
+@pytest.fixture
+def auth_headers() -> Callable[..., dict[str, str]]:
+    def auth_headers(*, user_id: UUID, key: str | None = None) -> dict[str, str]:
+        return {"Authorization": f"Bearer {user_id}", "Idempotency-Key": key or str(uuid4())}
+
+    return auth_headers

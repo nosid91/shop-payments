@@ -19,6 +19,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
+class CartStatus(StrEnum):
+    ACTIVE = "active"
+    CHECKED_OUT = "checked_out"
+    ABANDONED = "abandoned"
+
+
 class PaymentStatus(StrEnum):
     PENDING = "pending"
     SUCCEEDED = "succeeded"
@@ -75,7 +81,7 @@ class Cart(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=func.gen_random_uuid())
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
-    status: Mapped[str] = mapped_column(Text, server_default="active")
+    status: Mapped[str] = mapped_column(Text, server_default=CartStatus.ACTIVE)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
