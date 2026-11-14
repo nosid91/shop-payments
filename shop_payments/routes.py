@@ -1,7 +1,8 @@
 from http import HTTPStatus
 
 from flask import current_app, g, request
-from flask_openapi import APIBlueprint
+from flask_openapi import APIBlueprint, ValidationErrorModel
+from pydantic import RootModel
 
 from shop_payments.auth import UnauthorizedError, authenticate
 from shop_payments.models import FailureCode, PaymentStatus
@@ -18,6 +19,10 @@ from shop_payments.schemas import (
 )
 
 api = APIBlueprint(name="payments", import_name=__name__)
+
+
+class UnprocessableResponse(RootModel[ErrorResponse | list[ValidationErrorModel]]): ...
+
 
 ERROR_STATUS_CODES = {
     ErrorCode.CART_NOT_FOUND: HTTPStatus.NOT_FOUND,
@@ -89,6 +94,7 @@ def handle_unauthorized(_error: UnauthorizedError) -> tuple[dict, int]:
         402: PaymentResponse,
         404: ErrorResponse,
         409: ConflictResponse,
+        422: UnprocessableResponse,
         502: PaymentResponse,
         503: PaymentResponse,
         504: PaymentResponse,
