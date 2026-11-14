@@ -4,6 +4,7 @@ from uuid import UUID
 
 import psycopg
 import pybreaker
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import Select, exists, func, select
 from sqlalchemy.exc import IntegrityError
@@ -106,6 +107,17 @@ def _record_outcome(
         payment.status = PaymentStatus.FAILED
         payment.failure_code = failure_code
     return payment
+
+
+def _log_transition(*, payment: PaymentResponse, from_status: PaymentStatus | None) -> None:
+    logger.info(
+        "payment {payment_id} of cart {cart_id}: {from_status} -> {to_status} (failure: {failure_code})",
+        payment_id=str(payment.id),
+        cart_id=str(payment.cart_id),
+        from_status=from_status,
+        to_status=payment.status,
+        failure_code=payment.failure_code,
+    )
 
 
 def _replay(*, payment: Payment, cart_id: UUID, payment_method_id: UUID | None) -> PaymentResult:
@@ -214,6 +226,7 @@ def start_payment(
     if isinstance(opened, PaymentResult):
         return opened
     pending = opened.pending
+    _log_transition(payment=pending, from_status=None)
 
     charge_id = None
     failure_code = None
@@ -231,6 +244,11 @@ def start_payment(
         failure_code = FailureCode.PROVIDER_UNAVAILABLE
     except ProviderTimeoutError:
         # The money may have been charged: failing the payment would let the cart be paid a second time.
+        logger.warning(
+            "payment {payment_id} of cart {cart_id}: provider timed out, outcome unknown, payment stays pending",
+            payment_id=str(pending.id),
+            cart_id=str(pending.cart_id),
+        )
         return PaymentResult(payment=pending, replayed=False)
     else:
         charge_id = result.charge_id
@@ -245,4 +263,6 @@ def start_payment(
             charge_id=charge_id,
             failure_code=failure_code,
         )
-        return PaymentResult(payment=PaymentResponse.model_validate(obj=payment), replayed=False)
+        settled = PaymentResponse.model_validate(obj=payment)
+    _log_transition(payment=settled, from_status=PaymentStatus.PENDING)
+    return PaymentResult(payment=settled, replayed=False)
