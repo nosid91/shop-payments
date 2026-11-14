@@ -13,6 +13,7 @@ dependencies = [
     "pybreaker (>=1.4.1,<2.0.0)",
     "loguru (>=0.8.0,<0.9.0)",
     "gunicorn (>=27.0.1,<28.0.0)",
+    "pydantic (>=2.14.3,<3.0.0)",
 ]
 
 [tool.poetry]

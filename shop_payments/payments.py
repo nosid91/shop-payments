@@ -6,7 +6,7 @@ import psycopg
 import pybreaker
 from loguru import logger
 from pydantic import BaseModel
-from sqlalchemy import Select, exists, func, select
+from sqlalchemy import Select, exists, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
@@ -52,7 +52,7 @@ class PaymentError(Exception):
 class _KeyRaceError(Exception): ...
 
 
-class _Charge(BaseModel):
+class _PendingCharge(BaseModel):
     pending: PaymentResponse
     token: str
 
@@ -102,7 +102,6 @@ def _record_outcome(
         payment.provider_charge_id = charge_id
         cart = session.get_one(entity=Cart, ident=cart_id)
         cart.status = CartStatus.CHECKED_OUT
-        cart.updated_at = func.now()
     else:
         payment.status = PaymentStatus.FAILED
         payment.failure_code = failure_code
@@ -139,7 +138,7 @@ def _create_pending_payment(
     cart: Cart,
     idempotency_key: str,
     payment_method_id: UUID | None,
-) -> _Charge:
+) -> _PendingCharge:
     if cart.status != CartStatus.ACTIVE:
         raise PaymentError(code=ErrorCode.CART_NOT_PAYABLE, message="Cart is not active")
     _reject_pending_payment(session=session, cart_id=cart.id)
@@ -168,7 +167,7 @@ def _create_pending_payment(
             # Another cart's request holds the same key in a transaction we cannot see, and its cart lock is not ours.
             raise _KeyRaceError from error
         raise
-    return _Charge(pending=PaymentResponse.model_validate(obj=payment), token=method.provider_token)
+    return _PendingCharge(pending=PaymentResponse.model_validate(obj=payment), token=method.provider_token)
 
 
 def _open_payment(
@@ -178,7 +177,7 @@ def _open_payment(
     cart_id: UUID,
     idempotency_key: str,
     payment_method_id: UUID | None,
-) -> PaymentResult | _Charge:
+) -> PaymentResult | _PendingCharge:
     with session_factory.begin() as session:
         cart = session.scalars(
             select(Cart)

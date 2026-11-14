@@ -16,7 +16,6 @@ def create_app(*, settings: Settings | None = None, provider: MockPaymentProvide
         security_schemes={"bearer": {"type": "http", "scheme": "bearer"}},
     )
     settings = settings or Settings()
-    app.config["SETTINGS"] = settings
     app.extensions["session_factory"] = create_session_factory(database_url=settings.database.url)
     app.extensions["payment_provider"] = provider or MockPaymentProvider()
     app.extensions["provider_breaker"] = pybreaker.CircuitBreaker(

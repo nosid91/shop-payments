@@ -3,21 +3,10 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
-from sqlalchemy import (
-    CHAR,
-    CheckConstraint,
-    DateTime,
-    ForeignKey,
-    Index,
-    Numeric,
-    Text,
-    UniqueConstraint,
-    false,
-    func,
-    text,
-)
+from sqlalchemy import CHAR, DateTime, ForeignKey, Numeric, Text, false, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+# Names given by the payments migration; the service tells unique violations apart by them.
 UQ_PAYMENTS_USER_IDEMPOTENCY_KEY = "uq_payments_user_idempotency_key"
 UQ_PAYMENTS_CART_ACTIVE = "uq_payments_cart_active"
 
@@ -86,7 +75,7 @@ class Cart(Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     status: Mapped[str] = mapped_column(Text, server_default=CartStatus.ACTIVE)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     items: Mapped[list[CartItem]] = relationship()
 
@@ -104,22 +93,6 @@ class UserPaymentMethod(Base):
 
 class Payment(Base):
     __tablename__ = "payments"
-    __table_args__ = (
-        CheckConstraint("amount > 0", name="ck_payments_amount_positive"),
-        CheckConstraint("status IN ('pending', 'succeeded', 'failed')", name="ck_payments_status"),
-        CheckConstraint("(status = 'failed') = (failure_code IS NOT NULL)", name="ck_payments_failure_code"),
-        CheckConstraint(
-            "(status = 'succeeded') = (provider_charge_id IS NOT NULL)",
-            name="ck_payments_provider_charge_id",
-        ),
-        UniqueConstraint("user_id", "idempotency_key", name=UQ_PAYMENTS_USER_IDEMPOTENCY_KEY),
-        Index(
-            UQ_PAYMENTS_CART_ACTIVE,
-            "cart_id",
-            unique=True,
-            postgresql_where=text("status IN ('pending', 'succeeded')"),
-        ),
-    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=func.gen_random_uuid())
     cart_id: Mapped[UUID] = mapped_column(ForeignKey("carts.id"))
